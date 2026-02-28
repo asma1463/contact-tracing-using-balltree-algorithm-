@@ -1,0 +1,342 @@
+# Contact Tracing System using Ball Tree Algorithm
+# Efficient spatial querying for infectious disease contact tracing
+
+import numpy as np
+import pandas as pd
+from sklearn.neighbors import BallTree
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import random
+from datetime import datetime, timedelta
+
+# Set random seed for reproducibility
+np.random.seed(42)
+random.seed(42)
+
+class ContactTracingSystem:
+    """
+    Contact Tracing System using Ball Tree spatial indexing
+    for efficient proximity detection in infectious disease simulation.
+    """
+    
+    def __init__(self, distance_threshold=2.0, time_window_minutes=15):
+        """
+        Initialize contact tracing system with thresholds.
+        
+        Parameters:
+        -----------
+        distance_threshold : float
+            Maximum distance in meters for potential infection (default: 2m)
+        time_window_minutes : int
+            Time window in minutes for exposure duration (default: 15min)
+        """
+        self.distance_threshold = distance_threshold
+        self.time_window = timedelta(minutes=time_window_minutes)
+        self.ball_tree = None
+        self.student_data = None
+        self.infected_path = None
+        
+    def generate_synthetic_data(self, n_students=1000, simulation_hours=6):
+        """
+        Generate synthetic student movement data for simulation.
+        
+        Parameters:
+        -----------
+        n_students : int
+            Number of students to simulate
+        simulation_hours : int
+            Duration of simulation in hours
+            
+        Returns:
+        --------
+        pd.DataFrame : Student location data with timestamps
+        """
+        print(f"Generating synthetic data for {n_students} students over {simulation_hours} hours...")
+        
+        data = []
+        start_time = datetime.now()
+        
+        # Generate infected person path (random walk with bias)
+        infected_positions = self._generate_infected_path(simulation_hours)
+        self.infected_path = infected_positions
+        
+        # Generate student positions
+        for student_id in range(n_students):
+            # Random starting position (campus area: 0-1000m x 0-1000m)
+            base_x = random.uniform(0, 1000)
+            base_y = random.uniform(0, 1000)
+            
+            for hour in range(simulation_hours):
+                for minute in range(0, 60, 5):  # Every 5 minutes
+                    timestamp = start_time + timedelta(hours=hour, minutes=minute)
+                    
+                    # Add random movement
+                    noise_x = random.gauss(0, 10)
+                    noise_y = random.gauss(0, 10)
+                    
+                    x = max(0, min(1000, base_x + noise_x + hour * 2))
+                    y = max(0, min(1000, base_y + noise_y + hour * 1.5))
+                    
+                    data.append({
+                        'student_id': f'S{student_id:04d}',
+                        'timestamp': timestamp,
+                        'x': x,
+                        'y': y,
+                        'hour': hour,
+                        'minute': minute
+                    })
+        
+        self.student_data = pd.DataFrame(data)
+        print(f"Generated {len(self.student_data)} location records")
+        return self.student_data
+    
+    def _generate_infected_path(self, simulation_hours):
+        """Generate path for infected person (random walk)."""
+        path = []
+        x, y = 500, 500  # Start at center
+        
+        for hour in range(simulation_hours):
+            for minute in range(0, 60, 5):
+                # Random walk with momentum
+                x += random.gauss(0, 15)
+                y += random.gauss(0, 15)
+                x = max(50, min(950, x))
+                y = max(50, min(950, y))
+                
+                path.append({
+                    'timestamp': datetime.now() + timedelta(hours=hour, minutes=minute),
+                    'x': x,
+                    'y': y,
+                    'hour': hour,
+                    'minute': minute
+                })
+        
+        return pd.DataFrame(path)
+    
+    def build_spatial_index(self, hour_filter=None):
+        """
+        Build Ball Tree spatial index for efficient proximity queries.
+        
+        Parameters:
+        -----------
+        hour_filter : int, optional
+            Specific hour to index (None = all hours)
+        """
+        if hour_filter is not None:
+            data = self.student_data[self.student_data['hour'] == hour_filter].copy()
+        else:
+            data = self.student_data.copy()
+        
+        # Convert to radians for haversine distance (if using lat/lon)
+        # Here using Euclidean for simplicity (small scale)
+        coordinates = np.radians(data[['x', 'y']].values)
+        
+        # Build Ball Tree with haversine metric
+        self.ball_tree = BallTree(coordinates, metric='haversine')
+        
+        print(f"Built Ball Tree index with {len(data)} points")
+        return self.ball_tree, data
+    
+    def find_contacts(self, infected_position, timestamp, hour):
+        """
+        Find students within distance threshold of infected person.
+        
+        Parameters:
+        -----------
+        infected_position : tuple
+            (x, y) coordinates of infected person
+        timestamp : datetime
+            Current timestamp
+        hour : int
+            Current hour for filtering
+            
+        Returns:
+        --------
+        list : Student IDs of potential contacts
+        """
+        # Build index for specific hour
+        _, hour_data = self.build_spatial_index(hour_filter=hour)
+        
+        if len(hour_data) == 0:
+            return []
+        
+        # Query Ball Tree for neighbors within threshold
+        # Convert distance to angular distance (approximate)
+        angular_threshold = self.distance_threshold / 6371000  # Earth's radius in meters
+        
+        infected_coord = np.radians([[infected_position[0], infected_position[1]]])
+        
+        # Query radius
+        indices = self.ball_tree.query_radius(infected_coord, r=angular_threshold)
+        
+        # Get student IDs
+        contacts = hour_data.iloc[indices[0]]['student_id'].tolist()
+        
+        return contacts
+    
+    def run_contact_tracing(self):
+        """
+        Run full contact tracing simulation.
+        
+        Returns:
+        --------
+        dict : Contact tracing results with statistics
+        """
+        print("\nRunning contact tracing simulation...")
+        start_time = datetime.now()
+        
+        all_contacts = set()
+        contacts_by_time = []
+        
+        # Iterate through infected person's path
+        for _, row in self.infected_path.iterrows():
+            contacts = self.find_contacts(
+                (row['x'], row['y']),
+                row['timestamp'],
+                row['hour']
+            )
+            
+            all_contacts.update(contacts)
+            contacts_by_time.append({
+                'timestamp': row['timestamp'],
+                'infected_x': row['x'],
+                'infected_y': row['y'],
+                'num_contacts': len(contacts),
+                'contacts': contacts
+            })
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        
+        results = {
+            'total_contacts': len(all_contacts),
+            'unique_contacts': list(all_contacts),
+            'contacts_by_time': contacts_by_time,
+            'processing_time_seconds': elapsed,
+            'infected_path': self.infected_path
+        }
+        
+        print(f"Found {len(all_contacts)} unique contacts")
+        print(f"Processing time: {elapsed:.3f} seconds")
+        
+        return results
+    
+    def visualize_results(self, results, hour_to_plot=2):
+        """
+        Create visualization of contact tracing results.
+        
+        Parameters:
+        -----------
+        results : dict
+            Output from run_contact_tracing()
+        hour_to_plot : int
+            Specific hour to visualize
+        """
+        fig, ax = plt.subplots(figsize=(12, 10))
+        
+        # Filter data for specific hour
+        hour_data = self.student_data[self.student_data['hour'] == hour_to_plot]
+        infected_hour = self.infected_path[self.infected_path['hour'] == hour_to_plot]
+        
+        # Plot all students (light blue)
+        ax.scatter(hour_data['x'], hour_data['y'], 
+                  c='lightblue', alpha=0.6, s=20, label='Students')
+        
+        # Plot infected path (red line)
+        ax.plot(infected_hour['x'], infected_hour['y'], 
+               'r-', linewidth=2, alpha=0.7, label='Infected Path')
+        
+        # Plot infected current position (red star)
+        if len(infected_hour) > 0:
+            current_pos = infected_hour.iloc[-1]
+            ax.scatter(current_pos['x'], current_pos['y'], 
+                      c='red', s=300, marker='*', 
+                      edgecolors='black', linewidth=2,
+                      label='Infected Person', zorder=5)
+            
+            # Draw threshold circle
+            circle = Circle((current_pos['x'], current_pos['y']), 
+                          self.distance_threshold, 
+                          fill=False, color='red', 
+                          linestyle='--', linewidth=2,
+                          label=f'{self.distance_threshold}m Threshold')
+            ax.add_patch(circle)
+        
+        # Highlight contacts (orange)
+        contacts_in_hour = results['contacts_by_time'][hour_to_plot * 12]['contacts']
+        contact_data = hour_data[hour_data['student_id'].isin(contacts_in_hour)]
+        
+        if len(contact_data) > 0:
+            ax.scatter(contact_data['x'], contact_data['y'], 
+                      c='orange', s=80, marker='s',
+                      edgecolors='black', linewidth=1.5,
+                      label=f'Potential Contacts (n={len(contacts_in_hour)})', zorder=4)
+        
+        # Formatting
+        ax.set_xlim(0, 1000)
+        ax.set_ylim(0, 1000)
+        ax.set_xlabel('X Position (meters)', fontsize=12)
+        ax.set_ylabel('Y Position (meters)', fontsize=12)
+        ax.set_title(f'Contact Tracing Simulation - Hour {hour_to_plot}\n'
+                    f'Total Unique Contacts: {results["total_contacts"]} | '
+                    f'Processing Time: {results["processing_time_seconds"]:.3f}s', 
+                    fontsize=14, fontweight='bold')
+        ax.legend(loc='upper right', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return fig
+
+
+# ============================================
+# MAIN EXECUTION
+# ============================================
+
+if __name__ == "__main__":
+    # Initialize system
+    tracer = ContactTracingSystem(
+        distance_threshold=2.0,      # 2 meters
+        time_window_minutes=15       # 15 minutes
+    )
+    
+    # Generate synthetic data
+    student_data = tracer.generate_synthetic_data(
+        n_students=1000,
+        simulation_hours=6
+    )
+    
+    # Run contact tracing
+    results = tracer.run_contact_tracing()
+    
+    # Visualize results
+    tracer.visualize_results(results, hour_to_plot=2)
+    
+    # Performance comparison: Ball Tree vs Brute Force
+    print("\n" + "="*50)
+    print("PERFORMANCE COMPARISON")
+    print("="*50)
+    
+    # Brute force method
+    import time
+    sample_data = student_data[student_data['hour'] == 2]
+    infected_pos = (500, 500)
+    
+    # Brute force
+    start = time.time()
+    brute_force_contacts = []
+    for _, row in sample_data.iterrows():
+        dist = np.sqrt((row['x'] - infected_pos[0])**2 + (row['y'] - infected_pos[1])**2)
+        if dist <= 2.0:
+            brute_force_contacts.append(row['student_id'])
+    brute_time = time.time() - start
+    
+    # Ball Tree
+    start = time.time()
+    tracer.build_spatial_index(hour_filter=2)
+    ball_tree_contacts = tracer.find_contacts(infected_pos, None, 2)
+    ball_tree_time = time.time() - start
+    
+    print(f"Brute Force: {brute_time:.4f}s, Found {len(brute_force_contacts)} contacts")
+    print(f"Ball Tree:   {ball_tree_time:.4f}s, Found {len(ball_tree_contacts)} contacts")
+    print(f"Speedup: {brute_time/ball_tree_time:.1f}x")
